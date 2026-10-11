@@ -294,6 +294,15 @@ table.xl{width:100%;border-collapse:collapse;font-size:.8rem}
 .acc .an{font-size:.82rem;font-weight:600;opacity:.85}
 .acc .av{font-family:var(--f-fun);font-size:calc(1.2rem*var(--fun-scale));white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .recon{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)}
+/* split receipts and debts */
+.seg{grid-template-columns:repeat(4,1fr)}
+.seg button{padding:9px 4px;font-size:.88rem}
+.seg.seg2{grid-template-columns:1fr 1fr}
+.srow{display:grid;grid-template-columns:6.5em 1fr auto;gap:6px;align-items:center;margin-top:6px}
+.srow input,.srow select{padding:10px 11px;border:1.5px solid var(--line);border-radius:14px;background:var(--paper-2);min-width:0;width:100%}
+.srow .s-person{grid-column:1/-1}
+.s-del{border:0;background:none;font-size:1.3rem;color:var(--muted);padding:0 6px}
+.split-foot{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:8px;font-size:.82rem;font-weight:600;color:var(--muted)}
 .chip.add{border:1.5px dashed var(--line);background:none;color:var(--muted)}
 .err{color:var(--bad);font-size:.85rem;min-height:1.2em;margin-top:-6px;font-weight:600}
 .sheet-actions{display:flex;gap:8px}
@@ -330,10 +339,16 @@ table.xl{width:100%;border-collapse:collapse;font-size:.8rem}
       <button type="button" data-kind="exp" aria-pressed="true">Расход</button>
       <button type="button" data-kind="inc" aria-pressed="false">Доход</button>
       <button type="button" data-kind="transfer" aria-pressed="false">Перевод</button>
+      <button type="button" data-kind="debt" aria-pressed="false">Долг</button>
     </div>
     <button type="button" class="paste" id="pasteBtn">Вставить оплату из Apple Pay</button>
     <label class="amount"><input id="fAmount" inputmode="decimal" placeholder="0" aria-label="Сумма"><span>₸</span></label>
     <div class="quick" id="qAmount" aria-label="Частые суммы"></div>
+    <div id="debtWrap" hidden><div class="seg seg2" id="debtDir"><button type="button" data-dir="out" aria-pressed="true">Я дала в долг</button><button type="button" data-dir="in" aria-pressed="false">Я взяла в долг</button></div>
+      <p class="flabel" style="margin:12px 0 6px 4px">Кто</p><input class="f" id="fPerson" list="personList" placeholder="Имя, например Айгерим" aria-label="Кто"></div>
+    <datalist id="personList"></datalist>
+    <div><button type="button" class="paste" id="splitBtn">Разделить чек на части</button>
+      <div id="splitWrap" hidden><div id="splitRows"></div><div class="split-foot"><button type="button" class="mini" id="splitAdd">+ часть</button><span id="splitLeft"></span></div></div></div>
     <div id="sugWrap" hidden><p class="flabel" style="margin-bottom:6px">Часто покупаете</p><div class="sug" id="sug"></div></div>
     <p class="flabel" id="accLbl">С какого счёта</p>
     <div class="chips" id="fAcc"></div>
@@ -431,9 +446,18 @@ const accName=id=>accById(id)?.name||"без счёта";
 const accColor=id=>{const i=accounts().findIndex(a=>a.id===id);return i<0?"#D9CDD2":ACC_COLORS[i%ACC_COLORS.length]};
 // How a record moves money between accounts: spending takes from one, income adds, a transfer moves, a reconciliation corrects
 function effects(t){const a=t.account||NOACC;
+  if(t.writeoff)return [];
+  if(t.kind==="debt")return [[a,t.dir==="in"?t.amount:-t.amount]];
+  if(t.kind==="debtback")return [[a,t.dir==="in"?-t.amount:t.amount]];
   if(t.kind==="exp")return [[a,-t.amount]];if(t.kind==="inc"||t.kind==="adj")return [[a,t.amount]];
   if(t.kind==="transfer")return [[a,-t.amount],[t.to||NOACC,t.amount]];return []}
-const net1=t=>t.kind==="exp"?-t.amount:t.kind==="transfer"?0:t.amount;
+const net1=t=>t.kind==="transfer"?0:t.writeoff?-t.amount:effects(t).reduce((x,[,d])=>x+d,0);
+// Who owes whom, across all months: lent minus returned minus written off
+function debtState(){const m={};
+  for(const t of ALL){if(!t.person)continue;const dir=t.dir==="in"?"in":"out";const key=dir+"|"+t.person.trim().toLowerCase();
+    const e=m[key]=m[key]||{key,dir,name:t.person.trim(),v:0};
+    if(t.kind==="debt")e.v+=t.amount;else if(t.kind==="debtback"||t.writeoff)e.v-=t.amount}
+  return Object.values(m).filter(e=>e.v>=1).sort((a,b)=>b.v-a.v)}
 const accStartOf=md=>md&&md.accStart&&Object.keys(md.accStart).length?md.accStart:null;
 function balances(txs=S.tx,md=S.monthDoc){const b={};const st=accStartOf(md);
   if(st){for(const k in st)b[k]=(b[k]||0)+(+st[k]||0)}else if(md&&md.start)b[NOACC]=md.start;
@@ -445,13 +469,16 @@ const sumPlanInc=()=>cats("inc").reduce((s,c)=>s+planOf(c),0);
 
 function totals(txs=S.tx,monthDoc=S.monthDoc){
   const st=accStartOf(monthDoc);
-  const r={start:st?Object.values(st).reduce((a,v)=>a+(+v||0),0):(monthDoc&&monthDoc.start)||0,inc:0,daily:0,flex:0,fixed:0,save:0,adj:0,byCat:{}};
+  const r={start:st?Object.values(st).reduce((a,v)=>a+(+v||0),0):(monthDoc&&monthDoc.start)||0,inc:0,daily:0,flex:0,fixed:0,save:0,adj:0,debt:0,byCat:{}};
   for(const t of txs){
     if(t.kind==="adj"){r.adj+=t.amount;continue}
+    if(t.kind==="debt"){r.debt+=t.dir==="in"?t.amount:-t.amount;continue}
+    if(t.kind==="debtback"){r.debt+=t.dir==="in"?-t.amount:t.amount;continue}
+    if(t.writeoff)r.debt+=t.amount;
     if(t.kind!=="exp"&&t.kind!=="inc")continue;
     r.byCat[t.cat]=(r.byCat[t.cat]||0)+t.amount;
     if(t.kind==="inc")r.inc+=t.amount;else{const ty=typeOf(catById(t.cat));r[ty==="inc"?"flex":ty]+=t.amount}}
-  r.spent=r.daily+r.flex+r.fixed;r.out=r.spent+r.save;r.end=r.start+r.inc-r.out+r.adj;return r;
+  r.spent=r.daily+r.flex+r.fixed;r.out=r.spent+r.save;r.end=r.start+r.inc-r.out+r.adj+r.debt;return r;
 }
 /* Daily limit for the current month. Only "Каждый день" categories count against it.
    By plan: what is left of the daily-categories plan, over the remaining days (today included).
@@ -527,6 +554,8 @@ function stats(kind){
   return {notes,places,amounts};
 }
 function fillLists(){const st=stats("exp");
+  const ppl={};for(const t of ALL)if(t.person)ppl[t.person.trim()]=(ppl[t.person.trim()]||0)+1;
+  $("personList").innerHTML=Object.entries(ppl).sort((a,b)=>b[1]-a[1]).slice(0,30).map(([n])=>`<option value="${esc(n)}"></option>`).join("");
   $("noteList").innerHTML=Object.values(st.notes).sort((a,b)=>b.n-a.n).slice(0,40).map(e=>`<option value="${esc(e.label)}"></option>`).join("")}
 function frequent(kind){
   const m={};
@@ -576,7 +605,7 @@ function vOverview(){
   if(!S.txReady)return `<section class="card"><p class="note">Загружаю…</p></section>`;
   const isCur=S.month===curMonth,isFuture=S.month>curMonth;
   const hasExp=S.tx.some(t=>t.kind==="exp");
-  return (isCur?vToday()+vAccounts()+vStreak()+vRecurring():vMonthEnd(isFuture)+vAccounts())+vCompare()+vKpis()
+  return (isCur?vToday()+vAccounts()+vDebts()+vStreak()+vRecurring():vMonthEnd(isFuture)+vAccounts()+vDebts())+vCompare()+vKpis()
     +(hasExp?vBubbles()+vCalendar():`<section class="card empty"><b>${isFuture?"Месяц ещё не начался":"Банка ждёт первую запись"}</b>Нажмите «+», и здесь появятся пузыри категорий, календарь трат и любимые места.</section>`)
     +vGoals()+vStartEnd()+vPlanFact()+(hasExp?vStructure()+vPlaces():"")+vKassa(isCur);
 }
@@ -603,11 +632,22 @@ function vAccounts(){
   const b=balances();
   const list=accounts().map(a=>({name:a.name,v:b[a.id]||0,c:accColor(a.id)}));
   if(Math.round(b[NOACC]||0))list.push({name:"Без счёта",v:b[NOACC],c:"#D9CDD2"});
-  const total=list.reduce((x,y)=>x+y.v,0);const noacc=S.tx.filter(t=>!t.account&&(t.kind==="exp"||t.kind==="inc")).length;
+  const total=list.reduce((x,y)=>x+y.v,0);const noacc=S.tx.filter(t=>!t.account&&!t.writeoff&&(t.kind==="exp"||t.kind==="inc")).length;
   return `<section class="card"><div class="head"><h2>Мои счета</h2><span class="hint">всего ${fmt(total)}</span></div>
     <div class="accs">${list.map(x=>`<div class="acc" style="--c:${x.c}"><span class="an">${esc(x.name)}</span><span class="av ${x.v<0?"neg":""}">${fmt(x.v)}</span></div>`).join("")}</div>
     ${noacc?`<p class="note" style="margin-top:10px">${noacc} ${plural(noacc,"запись","записи","записей")} без счёта. Откройте ${plural(noacc,"её","их","их")} в «Записях» и выберите счёт, чтобы остатки сошлись.</p>`:""}
     ${S.month===curMonth?(S.recon?vRecon(b):`<button class="btn ghost" data-act="recon" style="margin-top:12px">Сверить с банком</button>`):""}</section>`;
+}
+function vDebts(){
+  const list=debtState();if(!list.length)return "";
+  const owed=list.filter(e=>e.dir==="out").reduce((x,e)=>x+e.v,0),owe=list.filter(e=>e.dir==="in").reduce((x,e)=>x+e.v,0);
+  const accOpts=accounts().map(a=>`<option value="${a.id}"${a.id===(lsGet("budget.acc")||"")?" selected":""}>${esc(a.name)}</option>`).join("");
+  return `<section class="card"><div class="head"><h2>Долги</h2><span class="hint">${[owed?"вам должны "+grp(owed):"",owe?"вы должны "+grp(owe):""].filter(Boolean).join(" · ")} ₸</span></div>
+    ${list.map(e=>{const act=S.debtAct&&S.debtAct.key===e.key?S.debtAct.a:null;const k=esc(e.key);
+      return `<div class="rec">${D(e.dir==="out"?FAM.inc[0]:FAM.flex[0])}<div style="min-width:0"><div class="nm">${esc(e.name)}</div><div class="when"><b style="color:var(--ink)">${grp(e.v)} ₸</b> · ${e.dir==="out"?"должна вам":"вы должны"}</div></div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end"><button class="mini" data-dact="back" data-key="${k}">${e.dir==="out"?"Вернула":"Я вернула"}</button>${e.dir==="out"?`<button class="mini" data-dact="off" data-key="${k}">Не вернёт</button>`:""}</div></div>
+      ${act==="back"?`<div class="form-row" style="margin:0 0 12px"><input id="dAmt" class="plan-in" inputmode="numeric" value="${grp(e.v)}" aria-label="Сколько"><select id="dAcc" aria-label="Счёт">${accOpts}</select><button class="btn" data-dgo="back" data-key="${k}">Готово</button></div>`:""}
+      ${act==="off"?`<div class="form-row" style="margin:0 0 12px"><span class="note">Записать ${fmt(e.v)} как вашу трату в</span><select id="dCat" aria-label="Категория">${cats("exp").map(c=>`<option value="${c.id}"${c.id==="friends"?" selected":""}>${esc(c.name)}</option>`).join("")}</select><button class="btn" data-dgo="off" data-key="${k}">Готово</button></div>`:""}`}).join("")}</section>`;
 }
 function vRecon(b){
   return `<div class="recon"><p class="note" style="margin-bottom:6px">Посмотрите баланс в приложениях банков и в кошельке и впишите. Разницу приложение запишет как «Сверку», и всё сойдётся.</p>
@@ -739,6 +779,7 @@ function vKassa(isCur){
     ${L("На начало",fmt(T.start))}${L(D(typeColor("inc"))+"Доходы",'<span class="pos">+'+grp(T.inc)+" ₸</span>")}
     ${TYPES.map(t=>L(D(typeColor(t))+(t==="daily"?"Еда":TYPE_LABEL[t]),"−"+grp(T[t])+pl(t))).join("")}
     ${T.adj?L("Сверка с банком",sgn(T.adj)):""}
+    ${T.debt?L("Долги: дала и вернули",sgn(T.debt)):""}
     ${L(isCur?"Остаток сейчас":"Остаток",`<span class="${T.end<0?"neg":""}">${fmt(T.end)}</span>`,"total")}</section>`;
 }
 
@@ -804,6 +845,8 @@ function vCats(){
 }
 
 function txRow(t){
+  if(t.kind==="debt"||t.kind==="debtback"){const out=t.dir!=="in";const lab=t.kind==="debt"?(out?"дала в долг":"взяла в долг"):(out?"вернула мне":"я вернула");const n=net1(t);
+    return `<button class="tx" data-tx="${t.id}"><span class="ic" style="background:${out?FAM.inc[3]:FAM.flex[3]}">${esc((t.person||"?")[0])}</span><div><div class="t1">${esc(t.person||"")} · ${lab}</div><div class="t2">${esc([t.note,t.place,t.account?accName(t.account):""].filter(Boolean).join(" · "))}</div></div><span class="v ${n>0?"pos":""}">${sgn(n)}</span></button>`}
   if(t.kind==="transfer")return `<button class="tx" data-tx="${t.id}"><span class="ic" style="background:${accColor(t.account)}">⇄</span><div><div class="t1">${esc(t.note||"Перевод")}</div><div class="t2">${esc(accName(t.account))} → ${esc(accName(t.to))}</div></div><span class="v">${grp(t.amount)} ₸</span></button>`;
   if(t.kind==="adj")return `<button class="tx" data-tx="${t.id}"><span class="ic" style="background:var(--paper-2)">±</span><div><div class="t1">Сверка с банком</div><div class="t2">${esc(accName(t.account))}</div></div><span class="v ${t.amount>0?"pos":"neg"}">${sgn(t.amount)}</span></button>`;
   const c=catById(t.cat);const nm=c?.name||"?";
@@ -816,11 +859,11 @@ function vOps(){
 }
 function renderOpsList(){
   const ch=$("opsChips"),el=$("opsList");if(!el)return;
-  ch.innerHTML=[["all","Все"],["exp","Расходы"],["inc","Доходы"],["transfer","Переводы"]].map(([k,l])=>`<button class="chip" data-kf="${k}" aria-pressed="${S.kindFilter===k&&!S.catFilter}">${l}</button>`).join("")
+  ch.innerHTML=[["all","Все"],["exp","Расходы"],["inc","Доходы"],["transfer","Переводы"],["debt","Долги"]].map(([k,l])=>`<button class="chip" data-kf="${k}" aria-pressed="${S.kindFilter===k&&!S.catFilter}">${l}</button>`).join("")
     +(S.catFilter?`<button class="chip" data-cf="" aria-pressed="true">${D(catColor(S.catFilter))}${esc(catById(S.catFilter)?.name||"")} ×</button>`:"");
   if(!S.txReady){el.innerHTML=`<p class="note">Загружаю…</p>`;return}
   const q=S.q.trim().toLowerCase();
-  const list=S.tx.filter(t=>(S.kindFilter==="all"||t.kind===S.kindFilter)&&(!S.catFilter||t.cat===S.catFilter)&&(!q||(t.note||"").toLowerCase().includes(q)||(t.place||"").toLowerCase().includes(q)||accName(t.account).toLowerCase().includes(q)||(catById(t.cat)?.name||"").toLowerCase().includes(q)))
+  const list=S.tx.filter(t=>(S.kindFilter==="all"||t.kind===S.kindFilter||(S.kindFilter==="debt"&&(t.kind==="debtback"||t.writeoff)))&&(!S.catFilter||t.cat===S.catFilter)&&(!q||(t.note||"").toLowerCase().includes(q)||(t.place||"").toLowerCase().includes(q)||accName(t.account).toLowerCase().includes(q)||(catById(t.cat)?.name||"").toLowerCase().includes(q)))
     .sort((a,b)=>b.date.localeCompare(a.date)||(b.ts||0)-(a.ts||0));
   if(!list.length){el.innerHTML=`<div class="empty"><b>${S.tx.length?"Ничего не нашлось":"Записей пока нет"}</b>${S.tx.length?"Попробуйте другой запрос или фильтр.":"Нажмите «+», чтобы добавить первую."}</div>`;return}
   const groups={};for(const t of list)(groups[t.date]=groups[t.date]||[]).push(t);
@@ -876,6 +919,14 @@ view.addEventListener("change",async e=>{
 view.addEventListener("keydown",e=>{if(e.key==="Enter"&&e.target.matches(".plan-in,#startIn,[data-rename],[data-accname]"))e.target.blur()});
 view.addEventListener("click",async e=>{
   const b=e.target.closest("button");if(!b)return;
+  if(b.dataset.dact){const k=b.dataset.key;S.debtAct=S.debtAct&&S.debtAct.key===k&&S.debtAct.a===b.dataset.dact?null:{key:k,a:b.dataset.dact};render();return}
+  if(b.dataset.dgo){const e=debtState().find(x=>x.key===b.dataset.key);if(!e)return;b.disabled=true;
+    if(b.dataset.dgo==="back"){let v=parseNum($("dAmt").value);if(!(v>0))v=e.v;v=Math.min(v,e.v);
+      await putTx({kind:"debtback",dir:e.dir,person:e.name,amount:Math.round(v*100)/100,account:$("dAcc").value,note:"Возврат долга",date:todayStr,month:curMonth,ts:Date.now()});
+      toast(e.dir==="out"?`${e.name} вернула ${fmt(v)}`:`Вы вернули ${e.name} ${fmt(v)}`)}
+    else{await putTx({kind:"exp",cat:$("dCat").value,amount:e.v,person:e.name,dir:"out",writeoff:true,account:"",note:"Не вернула: "+e.name,date:todayStr,month:curMonth,ts:Date.now()});
+      toast(`${fmt(e.v)} записаны как трата`)}
+    S.debtAct=null;pop(b);render();return}
   if(b.dataset.pay){const r=recurring().find(x=>x.id===b.dataset.pay);if(!r)return;b.disabled=true;
     await putTx({date:todayStr,month:curMonth,amount:r.amount,kind:"exp",cat:r.cat,note:r.name,place:r.place||"",rec:r.id,ts:Date.now()});pop(b);toast("Отмечено: "+r.name+" · "+fmt(r.amount));return}
   if(b.dataset.topup){const g=goals().find(x=>x.id===b.dataset.topup);const sc=cats("exp").find(c=>typeOf(c)==="save");openSheet(null,{note:"Пополнение: "+(g?g.name:""),cat:sc&&sc.id,goal:b.dataset.topup});return}
@@ -886,6 +937,7 @@ view.addEventListener("click",async e=>{
   if(b.dataset.filter){S.catFilter=b.dataset.filter;S.kindFilter="all";S.tab="ops";lsSet("budget.tab","ops");view.innerHTML="";render();return}
   if(b.dataset.tx){const t=S.tx.find(x=>x.id===b.dataset.tx);if(!t)return;
     if(t.kind==="adj"){toast("Сверка "+accName(t.account)+": "+sgn(t.amount),{label:"Удалить",fn:()=>delTx(t.id)});return}
+    if(t.kind==="debtback"){toast("Возврат долга, "+t.person+": "+fmt(t.amount),{label:"Удалить",fn:()=>delTx(t.id)});return}
     openSheet(t);return}
   if(b.dataset.delacc){const k="acc:"+b.dataset.delacc;if(S.armed!==k){S.armed=k;render();return}S.armed=null;
     await saveSettings({...settings(),accounts:accounts().filter(a=>a.id!==b.dataset.delacc)});toast("Счёт удалён, его записи останутся без счёта");return}
@@ -961,8 +1013,8 @@ async function exportXlsx(btn){
     const sum=[["Бюджет",monthName(S.month)+" "+S.month.slice(0,4)],["На начало",T.start],["Доходы",T.inc],["Каждый день",T.daily],["Гибкие",T.flex],["Обязательные",T.fixed],["Копилка",T.save],["Сверка",T.adj],["Остаток",T.end],[],["Категория","Тип","План","Факт","Разница"]];
     for(const c of cats()){const t=typeOf(c),f=T.byCat[c.id]||0,p=planOf(c);sum.push([c.name,TYPE_LABEL[t],p,f,t==="inc"?f-p:p-f])}
     const ws1=XLSX.utils.aoa_to_sheet(sum);ws1["!cols"]=[{wch:24},{wch:14},{wch:12},{wch:12},{wch:12}];XLSX.utils.book_append_sheet(wb,ws1,"Сводка");
-    const KL={exp:"Расход",inc:"Доход",transfer:"Перевод",adj:"Сверка"};
-    const rows=[["Дата","Тип","Сумма","Категория","На что","Где","Счёт","Куда"]].concat(S.tx.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(t=>[t.date,KL[t.kind]||t.kind,t.amount,catById(t.cat)?.name||"",t.note||"",t.place||"",t.account?accName(t.account):"",t.to?accName(t.to):""]));
+    const KL={exp:"Расход",inc:"Доход",transfer:"Перевод",adj:"Сверка",debt:"Долг",debtback:"Возврат долга"};
+    const rows=[["Дата","Тип","Сумма","Категория","На что","Где","Счёт","Куда / кто"]].concat(S.tx.slice().sort((a,b)=>a.date.localeCompare(b.date)).map(t=>[t.date,KL[t.kind]||t.kind,t.amount,catById(t.cat)?.name||"",t.note||"",t.place||"",t.account?accName(t.account):"",t.to?accName(t.to):(t.person||"")]));
     const ws2=XLSX.utils.aoa_to_sheet(rows);ws2["!cols"]=[{wch:12},{wch:9},{wch:11},{wch:22},{wch:30},{wch:18},{wch:12},{wch:12}];XLSX.utils.book_append_sheet(wb,ws2,"Записи");
     const data=new Uint8Array(XLSX.write(wb,{type:"array",bookType:"xlsx"}));const name=`Бюджет ${S.month}.xlsx`;
     if(downloads)await downloads.save({filename:name,data});
@@ -983,7 +1035,12 @@ function renderSheetCats(){
   $("fAcc").innerHTML=accounts().map(a=>`<button type="button" class="chip" data-fa="${a.id}" aria-pressed="${F.account===a.id}">${D(accColor(a.id))}${esc(a.name)}</button>`).join("");
   $("toWrap").hidden=!isT;
   if(isT)$("fTo").innerHTML=accounts().filter(a=>a.id!==F.account).map(a=>`<button type="button" class="chip" data-ft="${a.id}" aria-pressed="${F.to===a.id}">${D(accColor(a.id))}${esc(a.name)}</button>`).join("");
-  ["catLbl","fCats","placeLbl","fPlace","qPlace","qAmount"].forEach(id=>$(id).hidden=isT);$("noteLbl").textContent=isT?"Комментарий":"На что";$("fNote").placeholder=isT?"Например, сняла наличные":"Например, хлеб и молоко";$("pasteBtn").hidden=isT||!!F.id;if(isT)$("newCat").hidden=true;
+  const isD=F.kind==="debt",sp=!!F.split&&F.kind==="exp";
+  ["catLbl","fCats","placeLbl","fPlace","qPlace","qAmount"].forEach(id=>$(id).hidden=isT||isD);
+  if(sp){$("catLbl").hidden=true;$("fCats").hidden=true}
+  $("debtWrap").hidden=!isD;$("splitBtn").hidden=F.kind!=="exp"||!!F.id;$("splitWrap").hidden=!sp;
+  document.querySelectorAll("#debtDir button").forEach(x=>x.setAttribute("aria-pressed",String(x.dataset.dir===F.dir)));
+  if(isD)$("accLbl").textContent=F.dir==="in"?"На какой счёт получили":"С какого счёта дали";$("noteLbl").textContent=isT?"Комментарий":"На что";$("fNote").placeholder=isT?"Например, сняла наличные":"Например, хлеб и молоко";$("pasteBtn").hidden=isT||!!F.id;if(isT)$("newCat").hidden=true;
   $("fCats").innerHTML=catOrder(F.kind).map(c=>`<button type="button" class="chip" data-fc="${c.id}" aria-pressed="${F.cat===c.id}">${D(catColor(c.id))}${esc(c.name)}</button>`).join("")
     +`<button type="button" class="chip add" id="ncToggle">+ Новая категория</button>`;
   $("ncSheetType").innerHTML=F.kind==="inc"?`<option value="inc">Доход</option>`:TYPES.map(k=>`<option value="${k}"${k==="flex"?" selected":""}>${TYPE_LABEL[k]}</option>`).join("");
@@ -995,7 +1052,7 @@ function renderSheetCats(){
   F.qp=st?Object.values(st.places).filter(e=>e.n>=FREQ).sort((a,b)=>b.n-a.n).slice(0,8):[];
   $("qAmount").innerHTML=F.qa.map((e,i)=>`<button type="button" data-qa="${i}"><b>${grp(e.label)} ₸</b>${share(e.notes)>=.8&&mode(e.notes)?" · "+esc(mode(e.notes)):""}</button>`).join("");
   $("qPlace").innerHTML=F.qp.map((e,i)=>`<button type="button" data-qp="${i}">${D(catColor(mode(e.cats)))} ${esc(e.label)}</button>`).join("");
-  const showG=F.kind==="exp"&&typeOf(catById(F.cat))==="save"&&goals().length>0;$("goalWrap").hidden=!showG;
+  const showG=F.kind==="exp"&&!F.split&&typeOf(catById(F.cat))==="save"&&goals().length>0;$("goalWrap").hidden=!showG;
   if(showG)$("fGoals").innerHTML=`<button type="button" class="chip" data-fg="" aria-pressed="${!F.goal}">Без цели</button>`+goals().map(g=>`<button type="button" class="chip" data-fg="${g.id}" aria-pressed="${F.goal===g.id}">${esc(g.name)}</button>`).join("");
   document.querySelectorAll("#kindSeg button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.kind===F.kind)));
 }
@@ -1003,6 +1060,7 @@ function openSheet(t,prefill){
   F={id:t?t.id:null,kind:t?t.kind:"exp",cat:t?t.cat:(prefill&&prefill.cat)||null,catTouched:!!t||!!(prefill&&prefill.cat),armed:false,goal:t?t.goal||null:(prefill&&prefill.goal)||null,rec:t?t.rec||null:null,
     account:t?t.account||null:(prefill&&prefill.account)||lsGet("budget.acc")||accounts()[0]?.id,to:t?t.to||null:null,accTouched:!!t};
   if(F.account&&!accById(F.account))F.account=accounts()[0]?.id;
+  F.dir=t?t.dir||"out":"out";F.split=null;$("fPerson").value=t?t.person||"":"";renderSplit();
   $("sheetTitle").textContent=t?"Изменить запись":"Новая запись";
   $("fAmount").value=t?String(t.amount):(prefill&&prefill.amount)||"";$("fNote").value=t?t.note||"":(prefill&&prefill.note)||"";
   $("fPlace").value=t?t.place||"":(prefill&&prefill.place)||"";$("newCat").hidden=true;$("ncSheetName").value="";
@@ -1050,6 +1108,31 @@ $("ncSheetAdd").addEventListener("click",async()=>{const name=$("ncSheetName").v
   await saveSettings({...settings(),cats:settings().cats.concat([c])});F.cat=c.id;F.catTouched=true;$("newCat").hidden=true;renderSheetCats();toast("Категория «"+name+"» создана")});
 $("fCats").addEventListener("click",e=>{if(e.target.closest("#ncToggle")){$("newCat").hidden=!$("newCat").hidden;if(!$("newCat").hidden)$("ncSheetName").focus();return}
   const b=e.target.closest("[data-fc]");if(!b)return;F.cat=b.dataset.fc;F.catTouched=true;$("fErr").textContent="";renderSheetCats()});
+/* Split one receipt into parts: each part gets its own category, and a part paid for someone else becomes a debt */
+function renderSplit(){
+  $("splitBtn").textContent=F.split?"Не делить чек":"Разделить чек на части";$("splitWrap").hidden=!F.split;if(!F.split)return;
+  const opts=cats("exp").map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join("")+`<option value="__debt">За другого, в долг</option>`;
+  $("splitRows").innerHTML=F.split.map((x,i)=>`<div class="srow" data-i="${i}"><input class="s-amt" inputmode="decimal" placeholder="Сумма" value="${esc(x.amount)}" aria-label="Сумма части"><select class="s-cat" aria-label="Категория части">${opts}</select>${F.split.length>2?`<button type="button" class="s-del" aria-label="Убрать часть">×</button>`:"<span></span>"}<input class="s-person" list="personList" placeholder="За кого? Например, Айгерим" value="${esc(x.person||"")}" ${x.cat==="__debt"?"":"hidden"} aria-label="За кого"></div>`).join("");
+  $("splitRows").querySelectorAll(".srow").forEach((el,i)=>el.querySelector(".s-cat").value=F.split[i].cat);
+  splitLeft();
+}
+function splitLeft(){if(!F.split)return;const total=parseNum($("fAmount").value)||0;const sum=F.split.reduce((x,y)=>x+(parseNum(y.amount)||0),0);const d=total-sum;
+  $("splitLeft").textContent=!total?"Сначала впишите общую сумму":Math.abs(d)<1?"Всё распределено":d>0?`Осталось распределить ${fmt(d)}`:`Больше суммы на ${fmt(-d)}`}
+function fillFirst(){ // the first part takes whatever is left of the total
+  if(!F.split)return;const total=parseNum($("fAmount").value)||0;const rest=F.split.slice(1).reduce((x,y)=>x+(parseNum(y.amount)||0),0);
+  if(total>0&&total-rest>=0){F.split[0].amount=String(Math.round((total-rest)*100)/100);const el=$("splitRows").querySelector('.srow[data-i="0"] .s-amt');if(el)el.value=F.split[0].amount}splitLeft()}
+$("splitBtn").addEventListener("click",()=>{
+  if(F.split){F.split=null}else{const daily=cats("exp").find(c=>typeOf(c)==="daily");
+    F.split=[{amount:$("fAmount").value||"",cat:F.cat||(daily&&daily.id)||cats("exp")[0].id,person:""},{amount:"",cat:"__debt",person:""}]}
+  renderSplit();renderSheetCats()});
+$("splitAdd").addEventListener("click",()=>{F.split.push({amount:"",cat:cats("exp")[0].id,person:""});renderSplit()});
+$("splitRows").addEventListener("input",e=>{const row=e.target.closest(".srow");if(!row)return;const i=+row.dataset.i;
+  if(e.target.classList.contains("s-amt")){F.split[i].amount=e.target.value;if(i>0)fillFirst();else splitLeft()}
+  if(e.target.classList.contains("s-person"))F.split[i].person=e.target.value});
+$("splitRows").addEventListener("change",e=>{if(!e.target.classList.contains("s-cat"))return;const i=+e.target.closest(".srow").dataset.i;F.split[i].cat=e.target.value;renderSplit()});
+$("splitRows").addEventListener("click",e=>{if(!e.target.classList.contains("s-del"))return;F.split.splice(+e.target.closest(".srow").dataset.i,1);renderSplit();fillFirst()});
+$("fAmount").addEventListener("input",()=>{if(F.split)fillFirst()});
+$("debtDir").addEventListener("click",e=>{const b=e.target.closest("[data-dir]");if(!b)return;F.dir=b.dataset.dir;renderSheetCats()});
 $("fAcc").addEventListener("click",e=>{const b=e.target.closest("[data-fa]");if(!b)return;F.account=b.dataset.fa;F.accTouched=true;if(F.to===F.account)F.to=null;renderSheetCats()});
 $("fTo").addEventListener("click",e=>{const b=e.target.closest("[data-ft]");if(!b)return;F.to=b.dataset.ft;$("fErr").textContent="";renderSheetCats()});
 $("fGoals").addEventListener("click",e=>{const b=e.target.closest("[data-fg]");if(!b)return;F.goal=b.dataset.fg||null;renderSheetCats()});
@@ -1075,7 +1158,23 @@ $("sheet").addEventListener("submit",async e=>{
   const amount=parseNum($("fAmount").value);
   if(!(amount>0)){$("fErr").textContent="Введите сумму больше нуля.";$("fAmount").focus();return}
   const date=$("fDate").value||todayStr;let t;
-  if(F.kind==="transfer"){
+  if(F.kind==="debt"){const person=$("fPerson").value.trim();if(!person){$("fErr").textContent="Напишите, кто.";$("fPerson").focus();return}
+    t={date,month:date.slice(0,7),amount:Math.round(amount*100)/100,kind:"debt",dir:F.dir,person,account:F.account||"",note:$("fNote").value.trim(),ts:Date.now()};
+  }else if(F.kind==="exp"&&F.split&&!F.id){
+    const parts=F.split.map(x=>({a:parseNum(x.amount),cat:x.cat,person:(x.person||"").trim()})).filter(x=>x.a>0);
+    const sum=parts.reduce((x,y)=>x+y.a,0);
+    if(Math.abs(sum-amount)>=1){$("fErr").textContent=sum<amount?`Распределите ещё ${fmt(amount-sum)}`:`Части больше суммы на ${fmt(sum-amount)}`;return}
+    if(parts.some(x=>x.cat==="__debt"&&!x.person)){$("fErr").textContent="Напишите, за кого часть в долг.";return}
+    const gid="s"+Date.now().toString(36);const base={date,month:date.slice(0,7),note:$("fNote").value.trim(),place:$("fPlace").value.trim(),account:F.account||"",split:gid};
+    $("fSave").disabled=true;
+    try{for(const [i,x] of parts.entries()){const r=Object.assign({},base,{amount:Math.round(x.a*100)/100,ts:Date.now()+i});
+        if(x.cat==="__debt")Object.assign(r,{kind:"debt",dir:"out",person:x.person});else Object.assign(r,{kind:"exp",cat:x.cat});await putTx(r)}
+      if(F.account)lsSet("budget.acc",F.account);closeSheet();pop();
+      const debts=parts.filter(x=>x.cat==="__debt");
+      toast(`Записано: ${fmt(sum)}${debts.length?`, из них в долг ${debts.map(x=>x.person+" "+fmt(x.a)).join(", ")}`:""}`)}
+    catch(err){$("fErr").textContent="Не получилось сохранить. Попробуйте ещё раз."}
+    $("fSave").disabled=false;return;
+  }else if(F.kind==="transfer"){
     if(!F.account||!F.to||F.account===F.to){$("fErr").textContent="Выберите, откуда и куда перевод.";return}
     t={date,month:date.slice(0,7),amount:Math.round(amount*100)/100,kind:"transfer",account:F.account,to:F.to,note:$("fNote").value.trim(),ts:Date.now()};
   }else{
@@ -1084,7 +1183,7 @@ $("sheet").addEventListener("submit",async e=>{
   if(F.account)lsSet("budget.acc",F.account);
   if(F.goal&&typeOf(catById(F.cat))==="save")t.goal=F.goal;if(F.rec)t.rec=F.rec;
   $("fSave").disabled=true;
-  try{await putTx(t,F.id);closeSheet();if(!F.id)pop();toast(`${F.id?"Сохранено":"Записано"}: ${fmt(t.amount)} · ${t.kind==="transfer"?accName(t.account)+" → "+accName(t.to):catById(t.cat).name}${t.month!==S.month?" (в "+MONTHS_G[+t.month.slice(5)-1]+")":""}`)}
+  try{await putTx(t,F.id);closeSheet();if(!F.id)pop();toast(`${F.id?"Сохранено":"Записано"}: ${fmt(t.amount)} · ${t.kind==="transfer"?accName(t.account)+" → "+accName(t.to):t.kind==="debt"?(t.dir==="in"?"взяла в долг у ":"в долг: ")+t.person:catById(t.cat).name}${t.month!==S.month?" (в "+MONTHS_G[+t.month.slice(5)-1]+")":""}`)}
   catch(err){$("fErr").textContent=err&&err.code==="quota_exceeded"?"Хранилище заполнено. Удалите старые записи.":"Не получилось сохранить. Попробуйте ещё раз."}
   $("fSave").disabled=false;
 });
