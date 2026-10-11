@@ -1010,7 +1010,7 @@ function openSheet(t,prefill){
   $("fDelete").hidden=!t;$("fDelete").textContent="Удалить";$("fSave").textContent=t?"Сохранить":"Записать";
   renderSheetCats();if(!t&&($("fNote").value||$("fPlace").value))suggestCat();
   $("pasteBtn").hidden=!!t;
-  $("sheetWrap").hidden=false;if(!(prefill&&prefill.amount))setTimeout(()=>$("fAmount").focus(),60);
+  $("sheetWrap").hidden=false;if(!(prefill&&prefill.amount))setTimeout(()=>{($("fAmount").value?$("fNote"):$("fAmount")).focus()},120);
 }
 function closeSheet(){$("sheetWrap").hidden=true}
 function suggestCat(){ // a frequent description fills the usual place and category; otherwise reuse the last match
@@ -1096,6 +1096,10 @@ $("fDelete").onclick=async()=>{
 // Opened from an iPhone Shortcut after an Apple Pay payment: ?amount=2500&place=Magnum
 function handleLaunchParams(){
   let p;try{p=new URLSearchParams(location.search)}catch(e){return}
+  // ?pay=budget:2500;Magnum;Kaspi Gold arrives from the Apple Pay automation: open the form already filled in
+  const pay=p.get("pay");
+  if(pay){openSheet(null);if(!applyPaid(pay))toast("Не получилось прочитать оплату, впишите сумму");else toast("Оплата подставлена: допишите, на что, и нажмите «Записать»");
+    try{history.replaceState(null,"",location.pathname)}catch(e){}return}
   const amount=p.get("amount");if(!amount)return;
   const v=parseNum(amount);openSheet(null,{amount:isNaN(v)?"":String(v),note:p.get("note")||"",place:p.get("place")||""});
   try{history.replaceState(null,"",location.pathname)}catch(e){}
